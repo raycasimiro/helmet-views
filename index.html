@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Helmet Views</title>
+<style>
+  :root {
+    --bg: #eef0f3;
+    --panel: #f8f9fb;
+    --ink: #1c2230;
+    --muted: #7a8394;
+    --line: #dde1e8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 16px 20px 8px; }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .02em; }
+  header { align-items: center; }
+  .actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  #filename { color: var(--muted); font-size: 13px; max-width: 220px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .btn {
+    display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink); font-size: 13px;
+    font-weight: 600; font-family: inherit; text-decoration: none; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { border-color: #b9c0cc; }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .btn.primary:hover { background: #2d3548; }
+
+  /* stage fills the space under the header; the grid is the largest square that fits */
+  #stage {
+    flex: 1; min-height: 0; padding: 8px 20px 20px;
+    container-type: size; display: grid; place-items: center;
+  }
+  /* one square pane split invisibly into four square views */
+  #grid {
+    --cell: calc((min(100cqw, 100cqh) - 2px) / 2);   /* 2px = the pane's border */
+    display: grid; gap: 0;
+    grid-template-columns: repeat(2, var(--cell)); grid-template-rows: repeat(2, var(--cell));
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+  }
+  .view { position: relative; }
+
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted);
+    font-size: 14px; z-index: 3; pointer-events: none; }
+
+  @media (max-width: 640px) {
+    header { padding: 12px 16px 4px; flex-wrap: wrap; gap: 8px; }
+    .actions { margin-left: 0; width: 100%; }
+    #filename { display: none; }
+    #stage { padding: 8px 16px 16px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Helmet design views</h1>
+    <div class="actions">
+      <span id="filename"></span>
+      <a class="btn" href="helmet-blueprint.svg" download="helmet-texture-blueprint.svg">Download blueprint</a>
+      <button class="btn" id="download-image" type="button">Download image</button>
+      <label class="btn primary">Upload texture
+        <input id="upload" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+      </label>
+    </div>
+  </header>
+
+  <div id="stage">
+    <div id="grid">
+      <div class="view" data-view="front"></div>
+      <div class="view" data-view="left"></div>
+      <div class="view" data-view="back"></div>
+      <div class="view" data-view="top"></div>
+    </div>
+  </div>
+  <canvas id="gl"></canvas>
+  <div id="loading">Loading helmet…</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.setScissorTest(true);
+renderer.setClearColor(0x000000, 0);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const key = new THREE.DirectionalLight(0xffffff, 1.6);
+key.position.set(2, 4, 3);
+scene.add(key, new THREE.HemisphereLight(0xffffff, 0x8892a6, 0.6));
+
+// Helmet faces +Z, up is +Y (Blender -Y forward / Z up after glTF export).
+// Each view: where the camera sits (direction from the helmet) and its up vector.
+const VIEWS = {
+  front: { dir: new THREE.Vector3(0, 0, 1),  up: new THREE.Vector3(0, 1, 0) },
+  left:  { dir: new THREE.Vector3(1, 0, 0),  up: new THREE.Vector3(0, 1, 0) }, // wearer's left; visor points to screen-left
+  back:  { dir: new THREE.Vector3(0, 0, -1), up: new THREE.Vector3(0, 1, 0) },
+  top:   { dir: new THREE.Vector3(0, 1, 0),  up: new THREE.Vector3(-1, 0, 0) }, // visor points to screen-left
+};
+
+const panels = [...document.querySelectorAll('.view')].map(el => {
+  const v = VIEWS[el.dataset.view];
+  const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 100);
+  cam.up.copy(v.up);
+  return { el, name: el.dataset.view, ...v, cam };
+});
+
+let helmet, box = new THREE.Box3(), size = new THREE.Vector3();
+
+// Fit an orthographic camera so the helmet fills the panel with some margin.
+function fitOrtho(p, aspect) {
+  const cam = p.cam;
+  const dist = size.length() * 2;
+  cam.position.copy(p.dir).multiplyScalar(dist);
+  cam.lookAt(0, 0, 0);
+  cam.updateMatrixWorld();
+  const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+  const up = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+  let w = 0, h = 0;
+  for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+    const c = new THREE.Vector3(x, y, z);
+    w = Math.max(w, Math.abs(c.dot(right)));
+    h = Math.max(h, Math.abs(c.dot(up)));
+  }
+  const pad = 1.06;   // margin around the helmet in each view (1 = touching the edges)
+  const halfH = Math.max(h, w / aspect) * pad;
+  cam.top = halfH; cam.bottom = -halfH;
+  cam.left = -halfH * aspect; cam.right = halfH * aspect;
+  cam.near = 0.01; cam.far = dist * 3;
+  cam.updateProjectionMatrix();
+}
+
+// ---- Custom shell texture ----
+// The painted shell is the "main" mesh using material "Material.001"; the blueprint is its UV layout.
+let shellMaterial = null;
+const texLoader = new THREE.TextureLoader();
+
+function applyTexture(url) {
+  if (!shellMaterial) return Promise.reject(new Error('Helmet not loaded yet'));
+  return texLoader.loadAsync(url).then(tex => {
+    tex.flipY = false;                       // glTF UV convention: image top-left = UV (0,1)
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    const m = shellMaterial;
+    if (m.map) m.map.dispose();
+    m.map = tex;
+    m.color.set(0xffffff);
+    // Drop the old livery's normal/roughness/metal maps so they don't ghost through: plain gloss paint.
+    m.normalMap = null; m.roughnessMap = null; m.metalnessMap = null;
+    m.roughness = 0.28; m.metalness = 0.05;
+    m.needsUpdate = true;
+    // The old sponsor strip above the visor is a separate decal mesh; hide it so only your design shows.
+    const strip = helmet.getObjectByName('visor_logo');
+    if (strip) strip.visible = false;
+  });
+}
+window.applyTexture = applyTexture;
+
+document.getElementById('upload').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  applyTexture(url)
+    .then(() => { document.getElementById('filename').textContent = file.name; })
+    .catch(err => { alert('Could not load that image.'); console.error(err); })
+    .finally(() => { URL.revokeObjectURL(url); e.target.value = ''; });
+});
+
+// ---- Load model ----
+new GLTFLoader().load('helmet.glb', gltf => {
+  helmet = gltf.scene;
+  helmet.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.material?.name === 'Material.001') shellMaterial = o.material;
+    const name = (o.material?.name || '').toLowerCase();
+    // The Blender visor material doesn't translate well to glTF; give it a mirrored iridium look.
+    if (name.includes('glass')) {
+      o.material = new THREE.MeshPhysicalMaterial({
+        color: 0xff7a1a, metalness: 1.0, roughness: 0.08,
+        iridescence: 1.0, iridescenceIOR: 1.6, iridescenceThicknessRange: [300, 700],
+        transparent: true, opacity: 0.92, envMapIntensity: 1.4,
+      });
+    }
+  });
+  box.setFromObject(helmet);
+  const center = box.getCenter(new THREE.Vector3());
+  helmet.position.sub(center);
+  box.setFromObject(helmet);
+  box.getSize(size);
+  scene.add(helmet);  document.getElementById('loading').remove();
+}, undefined, err => {
+  document.getElementById('loading').textContent = 'Could not load helmet.glb';
+  console.error(err);
+});
+
+// ---- Render loop: one canvas, one scissored viewport per panel ----
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.floor(w * renderer.getPixelRatio()) || canvas.height !== Math.floor(h * renderer.getPixelRatio()))
+    renderer.setSize(w, h, false);
+}
+
+function drawPanel(rect, cam) {
+  const H = canvas.clientHeight;
+  const y = H - rect.bottom;
+  renderer.setViewport(rect.left, y, rect.width, rect.height);
+  renderer.setScissor(rect.left, y, rect.width, rect.height);
+  renderer.render(scene, cam);
+}
+
+function tick() {
+  resize();
+  renderer.setScissor(0, 0, canvas.clientWidth, canvas.clientHeight);
+  renderer.clear();
+  if (helmet) {
+    for (const p of panels) {
+      const r = p.el.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > canvas.clientHeight || r.width === 0) continue;
+      fitOrtho(p, r.width / r.height);
+      drawPanel(r, p.cam);
+    }
+  }
+  requestAnimationFrame(tick);
+}
+tick();
+
+// ---- Download image: re-render the 2x2 pane at a fixed high resolution ----
+const EXPORT_SIZE = Math.min(2048, renderer.capabilities.maxTextureSize);
+
+function exportImage() {
+  if (!helmet) return;
+  const S = EXPORT_SIZE, half = S / 2;
+  const prevRatio = renderer.getPixelRatio();
+  const prevW = canvas.clientWidth, prevH = canvas.clientHeight;
+
+  // Temporarily resize the drawing buffer (not the on-screen size) and draw each quadrant.
+  renderer.setPixelRatio(1);
+  renderer.setSize(S, S, false);
+  renderer.setScissor(0, 0, S, S);
+  renderer.clear();
+  for (const p of panels) {
+    const i = ['front', 'left', 'back', 'top'].indexOf(p.name);
+    const x = (i % 2) * half;
+    const y = i < 2 ? half : 0;               // WebGL origin is bottom-left; front/left are the top row
+    fitOrtho(p, 1);
+    renderer.setViewport(x, y, half, half);
+    renderer.setScissor(x, y, half, half);
+    renderer.render(scene, p.cam);
+  }
+
+  // Copy onto the pane's background colour in the same task, before the buffer is cleared.
+  const out = document.createElement('canvas');
+  out.width = out.height = S;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() || '#f8f9fb';
+  ctx.fillRect(0, 0, S, S);
+  ctx.drawImage(canvas, 0, 0);
+
+  // Restore the live view; the next frame redraws it.
+  renderer.setPixelRatio(prevRatio);
+  renderer.setSize(prevW, prevH, false);
+
+  out.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'helmet-views.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, 'image/png');
+}
+
+document.getElementById('download-image').addEventListener('click', exportImage);
+</script>
+</body>
+</html>
